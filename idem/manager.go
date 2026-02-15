@@ -77,12 +77,25 @@ func (m *Manager) Do(
 		TTL:         m.ttl,
 	})
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, wrapStoreUnavailable(err)
 	}
 
 	switch br.Decision {
 	case DecisionReplay:
-		if br.Cached == nil || len(br.Cached.ResponseBytes) == 0 {
+		if br.Cached == nil {
+			return DecisionReplay, nil, ErrReplayMissingCached
+		}
+
+		if br.Cached.Final && !br.Cached.Success {
+			return DecisionReplay, nil, ReplayWithFailureError{
+				Scope: key.Scope(),
+				Key:   key,
+				Code:  br.Cached.FailureCode,
+				Msg:   br.Cached.FailureMsg,
+			}
+		}
+
+		if len(br.Cached.ResponseBytes) == 0 {
 			return DecisionReplay, nil, ErrReplayMissingCached
 		}
 		return DecisionReplay, br.Cached.ResponseBytes, nil
@@ -114,7 +127,7 @@ func (m *Manager) Do(
 				Now:           m.now().UTC(),
 			})
 			if cerr != nil {
-				return DecisionNew, nil, cerr
+				return DecisionNew, nil, wrapStoreUnavailable(cerr)
 			}
 			return DecisionNew, resp, nil
 		}

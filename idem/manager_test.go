@@ -202,3 +202,30 @@ func TestManager_Do_INPROGRESS_DoesNotExecute(t *testing.T) {
 		t.Fatalf("expected fail not called, got %d", store.failCalls)
 	}
 }
+
+func TestManager_Do_REPLAY_WithFailure_ReturnsTypedError(t *testing.T) {
+	store := &memStore{
+		beginRes: BeginResult{
+			Decision: DecisionReplay,
+			Cached: &StoredResult{
+				Final:       true,
+				Success:     false,
+				FailureCode: "DECLINED",
+				FailureMsg:  "insufficient funds",
+			},
+		},
+	}
+
+	m := MustNewManager(store)
+
+	dec, _, err := m.Do(context.Background(), Scope("payments"), "k1", []byte(`{"x":1}`), func(ctx context.Context) ([]byte, error) {
+		return []byte("should_not_run"), nil
+	})
+
+	if dec != DecisionReplay {
+		t.Fatalf("expected REPLAY, got %v", dec)
+	}
+	if !errors.Is(err, ErrReplayWithFailure) {
+		t.Fatalf("expected ErrReplayWithFailure, got %v", err)
+	}
+}
