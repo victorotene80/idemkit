@@ -95,6 +95,9 @@ func (m *Manager) Do(
 			Got:      fp,
 		}
 
+	case DecisionInProgress:
+		return DecisionInProgress, nil, InProgressError{Scope: key.Scope(), Key: key}
+
 	case DecisionNew:
 		if br.Token == "" {
 			return 0, nil, ErrInvalidToken
