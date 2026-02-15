@@ -1,40 +1,169 @@
 package idem
 
-import "testing"
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+)
 
-func TestKey_NormalizeAndString(t *testing.T) {
-	k, err := NewKey(Scope(" Payments "), "req_123")
+type memStore struct {
+	beginRes BeginResult
+	beginErr error
+
+	commitErr error
+	failErr   error
+
+	beginCalls  int
+	commitCalls int
+	failCalls   int
+
+	lastCommit CommitRequest
+	lastFail   FailRequest
+}
+
+func (s *memStore) Begin(ctx context.Context, req BeginRequest) (BeginResult, error) {
+	s.beginCalls++
+	return s.beginRes, s.beginErr
+}
+
+func (s *memStore) Commit(ctx context.Context, req CommitRequest) error {
+	s.commitCalls++
+	s.lastCommit = req
+	return s.commitErr
+}
+
+func (s *memStore) Fail(ctx context.Context, req FailRequest) error {
+	s.failCalls++
+	s.lastFail = req
+	return s.failErr
+}
+
+func TestManager_Do_REPLAY_ReturnsCached(t *testing.T) {
+	store := &memStore{
+		beginRes: BeginResult{
+			Decision: DecisionReplay,
+			Cached: &StoredResult{
+				Final:         true,
+				Success:       true,
+				ResponseBytes: []byte(`{"ok":true}`),
+			},
+		},
+	}
+
+	m := MustNewManager(store, WithNow(func() time.Time { return time.Unix(1, 0).UTC() }))
+
+	called := 0
+	dec, resp, err := m.Do(context.Background(), Scope("payments"), "k1", []byte("canon"), func(ctx context.Context) ([]byte, error) {
+		called++
+		return nil, nil
+	})
+
 	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+		t.Fatalf("unexpected err: %v", err)
 	}
-	if k.Scope().String() != "payments" {
-		t.Fatalf("expected normalized scope 'payments', got %q", k.Scope().String())
+	if dec != DecisionReplay {
+		t.Fatalf("expected REPLAY, got %v", dec)
 	}
-	if k.String() != "payments:req_123" {
-		t.Fatalf("unexpected key string: %q", k.String())
+	if called != 0 {
+		t.Fatalf("expected fn not called, got %d", called)
 	}
-}
-
-func TestKey_Invalid(t *testing.T) {
-	_, err := NewKey(Scope(""), "x")
-	if err != ErrInvalidScope {
-		t.Fatalf("expected ErrInvalidScope, got %v", err)
-	}
-	_, err = NewKey(Scope("payments"), "")
-	if err != ErrInvalidKey {
-		t.Fatalf("expected ErrInvalidKey, got %v", err)
+	if string(resp) != `{"ok":true}` {
+		t.Fatalf("unexpected cached resp: %s", string(resp))
 	}
 }
 
-func TestFingerprint_SHA256_Deterministic(t *testing.T) {
-	a := FingerprintSHA256([]byte("hello"))
-	b := FingerprintSHA256([]byte("hello"))
-	c := FingerprintSHA256([]byte("world"))
+func TestManager_Do_CONFLICT_ReturnsConflictError(t *testing.T) {
+	existing := FingerprintSHA256([]byte("old"))
 
-	if a != b {
-		t.Fatalf("expected same fingerprint for same input")
+	store := &memStore{
+		beginRes: BeginResult{
+			Decision:            DecisionConflict,
+			ExistingFingerprint: existing,
+		},
 	}
-	if a == c {
-		t.Fatalf("expected different fingerprint for different input")
+
+	m := MustNewManager(store, WithNow(func() time.Time { return time.Unix(1, 0).UTC() }))
+
+	dec, _, err := m.Do(context.Background(), Scope("payments"), "k1", []byte("new"), func(ctx context.Context) ([]byte, error) {
+		return []byte("ok"), nil
+	})
+
+	if dec != DecisionConflict {
+		t.Fatalf("expected CONFLICT, got %v", dec)
+	}
+
+	var ce ConflictError
+	if !errors.As(err, &ce) {
+		t.Fatalf("expected ConflictError, got %T: %v", err, err)
+	}
+	if ce.Existing != existing {
+		t.Fatalf("expected existing fingerprint to match")
+	}
+}
+
+func TestManager_Do_NEW_CommitsOnSuccess(t *testing.T) {
+	store := &memStore{
+		beginRes: BeginResult{
+			Decision: DecisionNew,
+			Token:    Token("tok"),
+		},
+	}
+
+	m := MustNewManager(store, WithNow(func() time.Time { return time.Unix(1, 0).UTC() }))
+
+	called := 0
+	dec, resp, err := m.Do(context.Background(), Scope("payments"), "k1", []byte("canon"), func(ctx context.Context) ([]byte, error) {
+		called++
+		return []byte("ok"), nil
+	})
+
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if dec != DecisionNew {
+		t.Fatalf("expected NEW, got %v", dec)
+	}
+	if called != 1 {
+		t.Fatalf("expected fn called once, got %d", called)
+	}
+	if store.commitCalls != 1 {
+		t.Fatalf("expected commit called once, got %d", store.commitCalls)
+	}
+	if string(resp) != "ok" {
+		t.Fatalf("unexpected resp: %s", string(resp))
+	}
+	if store.lastCommit.Token != "tok" {
+		t.Fatalf("expected commit token tok, got %q", store.lastCommit.Token)
+	}
+}
+
+func TestManager_Do_NEW_FailsOnBusinessError(t *testing.T) {
+	store := &memStore{
+		beginRes: BeginResult{
+			Decision: DecisionNew,
+			Token:    Token("tok"),
+		},
+	}
+
+	m := MustNewManager(store, WithNow(func() time.Time { return time.Unix(1, 0).UTC() }))
+
+	bizErr := errors.New("boom")
+
+	dec, _, err := m.Do(context.Background(), Scope("payments"), "k1", []byte("canon"), func(ctx context.Context) ([]byte, error) {
+		return nil, bizErr
+	})
+
+	if dec != DecisionNew {
+		t.Fatalf("expected NEW, got %v", dec)
+	}
+	if !errors.Is(err, bizErr) {
+		t.Fatalf("expected business error, got %v", err)
+	}
+	if store.failCalls != 1 {
+		t.Fatalf("expected fail called once, got %d", store.failCalls)
+	}
+	if store.commitCalls != 0 {
+		t.Fatalf("expected commit not called, got %d", store.commitCalls)
 	}
 }
