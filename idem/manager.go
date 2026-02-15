@@ -10,6 +10,7 @@ type Manager struct {
 	store Store
 	ttl   time.Duration
 	now   func() time.Time
+	canon Canonicalizer
 }
 
 type ManagerOption func(*Manager)
@@ -48,7 +49,7 @@ func (m *Manager) Do(
 	ctx context.Context,
 	scope Scope,
 	keyID string,
-	canonical []byte,
+	reqBytes []byte,
 	fn func(context.Context) ([]byte, error),
 ) (Decision, []byte, error) {
 
@@ -61,7 +62,11 @@ func (m *Manager) Do(
 		return 0, nil, err
 	}
 
-	fp := FingerprintSHA256(canonical)
+	fp, _, err := FingerprintRequest(reqBytes, m.canon)
+	if err != nil {
+		return 0, nil, err
+	}
+
 	now := m.now().UTC()
 
 	br, err := m.store.Begin(ctx, BeginRequest{
@@ -77,7 +82,6 @@ func (m *Manager) Do(
 
 	switch br.Decision {
 	case DecisionReplay:
-		// First principles: replay must return cached success response.
 		if br.Cached == nil || len(br.Cached.ResponseBytes) == 0 {
 			return DecisionReplay, nil, ErrReplayMissingCached
 		}
@@ -91,16 +95,16 @@ func (m *Manager) Do(
 			Got:      fp,
 		}
 
+	case DecisionInProgress:
+		return DecisionInProgress, nil, InProgressError{Scope: key.Scope(), Key: key}
+
 	case DecisionNew:
 		if br.Token == "" {
-			// store bug / contract violation
 			return 0, nil, ErrInvalidToken
 		}
 
-		// Run business function exactly once (per NEW claim).
 		resp, bizErr := fn(ctx)
 		if bizErr == nil {
-			// Commit success. If commit fails, surface commit error (caller may retry).
 			cerr := m.store.Commit(ctx, CommitRequest{
 				Scope:         key.Scope(),
 				Key:           key,
@@ -129,4 +133,8 @@ func (m *Manager) Do(
 	default:
 		return 0, nil, errors.New("unknown decision")
 	}
+}
+
+func WithCanonicalizer(c Canonicalizer) ManagerOption {
+	return func(m *Manager) { m.canon = c }
 }

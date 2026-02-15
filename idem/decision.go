@@ -6,6 +6,7 @@ const (
 	DecisionNew Decision = iota + 1
 	DecisionReplay
 	DecisionConflict
+	DecisionInProgress
 )
 
 func (d Decision) String() string {
@@ -16,6 +17,8 @@ func (d Decision) String() string {
 		return "REPLAY"
 	case DecisionConflict:
 		return "CONFLICT"
+	case DecisionInProgress:
+		return "IN_PROGRESS"
 	default:
 		return "UNKNOWN"
 	}

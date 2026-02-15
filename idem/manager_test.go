@@ -167,3 +167,38 @@ func TestManager_Do_NEW_FailsOnBusinessError(t *testing.T) {
 		t.Fatalf("expected commit not called, got %d", store.commitCalls)
 	}
 }
+
+func TestManager_Do_INPROGRESS_DoesNotExecute(t *testing.T) {
+	store := &memStore{
+		beginRes: BeginResult{
+			Decision: DecisionInProgress,
+		},
+	}
+
+	m := MustNewManager(store, WithNow(func() time.Time { return time.Unix(1, 0).UTC() }))
+
+	called := 0
+	dec, _, err := m.Do(context.Background(), Scope("payments"), "k1", []byte("canon"), func(ctx context.Context) ([]byte, error) {
+		called++
+		return []byte("ok"), nil
+	})
+
+	if dec != DecisionInProgress {
+		t.Fatalf("expected IN_PROGRESS, got %v", dec)
+	}
+	if called != 0 {
+		t.Fatalf("expected fn not called, got %d", called)
+	}
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !errors.Is(err, ErrInProgress) {
+		t.Fatalf("expected ErrInProgress, got %v", err)
+	}
+	if store.commitCalls != 0 {
+		t.Fatalf("expected commit not called, got %d", store.commitCalls)
+	}
+	if store.failCalls != 0 {
+		t.Fatalf("expected fail not called, got %d", store.failCalls)
+	}
+}

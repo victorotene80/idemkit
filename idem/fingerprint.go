@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 )
 
+type Canonicalizer func(reqBytes []byte) ([]byte, error)
+
 type Fingerprint [32]byte
 
 func (f Fingerprint) Hex() string { return hex.EncodeToString(f[:]) }
@@ -27,4 +29,15 @@ func FingerprintFromHex(h string) (Fingerprint, error) {
 	var f Fingerprint
 	copy(f[:], b)
 	return f, nil
+}
+
+func FingerprintRequest(reqBytes []byte, canon Canonicalizer) (Fingerprint, []byte, error) {
+	if canon != nil {
+		c, err := canon(reqBytes)
+		if err != nil {
+			return Fingerprint{}, nil, err
+		}
+		return FingerprintSHA256(c), c, nil
+	}
+	return FingerprintSHA256(reqBytes), reqBytes, nil
 }
