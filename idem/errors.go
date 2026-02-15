@@ -16,6 +16,7 @@ var (
 	ErrInvalidToken        = errors.New("invalid token")
 	ErrConflict            = errors.New("idempotency conflict")
 	ErrReplayMissingCached = errors.New("replay missing cached response")
+	ErrInvalidJSON         = errors.New("invalid JSON")
 )
 
 type ConflictError struct {
